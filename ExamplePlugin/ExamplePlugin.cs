@@ -1,126 +1,157 @@
 using BepInEx;
 using R2API;
 using RoR2;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 
+using System.Linq;
+
 namespace ExamplePlugin
 {
-    //This is an example plugin that can be put in BepInEx/plugins/ExamplePlugin/ExamplePlugin.dll to test out.
-    //It's a small plugin that adds a relatively simple item to the game, and gives you that item whenever you press F2.
-
-    //This attribute specifies that we have a dependency on R2API, as we're using it to add our item to the game.
-    //You don't need this if you're not using R2API in your plugin, it's just to tell BepInEx to initialize R2API before this plugin so it's safe to use R2API.
     [BepInDependency(R2API.R2API.PluginGUID)]
 
     //This attribute is required, and lists metadata for your plugin.
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
 
-    //This is the main declaration of our plugin class. BepInEx searches for all classes inheriting from BaseUnityPlugin to initialize on startup.
-    //BaseUnityPlugin itself inherits from MonoBehaviour, so you can use this as a reference for what you can declare and use in your plugin class: https://docs.unity3d.com/ScriptReference/MonoBehaviour.html
     public class ExamplePlugin : BaseUnityPlugin
     {
-        //The Plugin GUID should be a unique ID for this plugin, which is human readable (as it is used in places like the config).
-        //If we see this PluginGUID as it is on thunderstore, we will deprecate this mod. Change the PluginAuthor and the PluginName !
         public const string PluginGUID = PluginAuthor + "." + PluginName;
-        public const string PluginAuthor = "AuthorName";
-        public const string PluginName = "ExamplePlugin";
+        public const string PluginAuthor = "ravenr";
+        public const string PluginName = "challengeoforder";
         public const string PluginVersion = "1.0.0";
 
-        //We need our item definition to persist through our functions, and therefore make it a class field.
-        private static ItemDef myItemDef;
 
         //The Awake() method is run at the very start when the game is initialized.
         public void Awake()
         {
             //Init our logging class so that we can properly log for debugging
             Log.Init(Logger);
+            Log.Info("Challenge of Order: Awake() called, setting up hooks.");
 
-            //First let's define our item
-            myItemDef = ScriptableObject.CreateInstance<ItemDef>();
 
-            // Language Tokens, explained there https://risk-of-thunder.github.io/R2Wiki/Mod-Creation/Assets/Localization/
-            myItemDef.name = "EXAMPLE_CLOAKONKILL_NAME";
-            myItemDef.nameToken = "EXAMPLE_CLOAKONKILL_NAME";
-            myItemDef.pickupToken = "EXAMPLE_CLOAKONKILL_PICKUP";
-            myItemDef.descriptionToken = "EXAMPLE_CLOAKONKILL_DESC";
-            myItemDef.loreToken = "EXAMPLE_CLOAKONKILL_LORE";
-
-            //The tier determines what rarity the item is:
-            //Tier1=white, Tier2=green, Tier3=red, Lunar=Lunar, Boss=yellow,
-            //and finally NoTier is generally used for helper items, like the tonic affliction
-#pragma warning disable Publicizer001 // Accessing a member that was not originally public. Here we ignore this warning because with how this example is setup we are forced to do this
-            myItemDef._itemTierDef = Addressables.LoadAssetAsync<ItemTierDef>("RoR2/Base/Common/Tier2Def.asset").WaitForCompletion();
-#pragma warning restore Publicizer001
-            // Instead of loading the itemtierdef directly, you can also do this like below as a workaround
-            //myItemDef.deprecatedTier = ItemTier.Tier2;
-
-            //You can create your own icons and prefabs through assetbundles, but to keep this boilerplate brief, we'll be using question marks.
-            myItemDef.pickupIconSprite = Resources.Load<Sprite>("Textures/MiscIcons/texMysteryIcon");
-            myItemDef.pickupModelPrefab = Resources.Load<GameObject>("Prefabs/PickupModels/PickupMystery");
-
-            //Can remove determines if a shrine of order, or a printer can take this item, generally true, except for NoTier items.
-            myItemDef.canRemove = true;
-
-            //Hidden means that there will be no pickup notification,
-            //and it won't appear in the inventory at the top of the screen.
-            //This is useful for certain noTier helper items, such as the DrizzlePlayerHelper.
-            myItemDef.hidden = false;
-
-            //You can add your own display rules here, where the first argument passed are the default display rules: the ones used when no specific display rules for a character are found.
-            //For this example, we are omitting them, as they are quite a pain to set up without tools like ItemDisplayPlacementHelper
-            var displayRules = new ItemDisplayRuleDict(null);
-
-            //Then finally add it to R2API
-            ItemAPI.Add(new CustomItem(myItemDef, displayRules));
-
-            //But now we have defined an item, but it doesn't do anything yet. So we'll need to define that ourselves.
-            GlobalEventManager.onCharacterDeathGlobal += GlobalEventManager_onCharacterDeathGlobal;
+            On.RoR2.Inventory.GiveItem_ItemIndex_int += Inventory_GiveItem_ItemIndex_int;
 
             // This line of log will appear in the bepinex console when the Awake method is done.
             Log.Info(nameof(Awake) + " done.");
         }
 
-        private void GlobalEventManager_onCharacterDeathGlobal(DamageReport report)
+        public class PerTierTracker : MonoBehaviour
         {
-            //If a character was killed by the world, we shouldn't do anything.
-            if (!report.attacker || !report.attackerBody)
+            private readonly Dictionary<ItemTier, ItemIndex> chosenByTier = new Dictionary<ItemTier, ItemIndex>();
+
+            public bool TryGetChosenItem(ItemTier tier, out ItemIndex itemIndex)
             {
-                return;
+                return chosenByTier.TryGetValue(tier, out itemIndex);
             }
 
-            var attackerCharacterBody = report.attackerBody;
-
-            //We need an inventory to do check for our item
-            if (attackerCharacterBody.inventory)
+            public void SetChosenItem(ItemTier tier, ItemIndex itemIndex)
             {
-                //store the amount of our item we have
-                var garbCount = attackerCharacterBody.inventory.GetItemCount(myItemDef.itemIndex);
-                if (garbCount > 0 &&
-                    //Roll for our 50% chance.
-                    Util.CheckRoll(50, attackerCharacterBody.master))
-                {
-                    //Since we passed all checks, we now give our attacker the cloaked buff.
-                    //Note how we are scaling the buff duration depending on the number of the custom item in our inventory.
-                    attackerCharacterBody.AddTimedBuff(RoR2Content.Buffs.Cloak, 3 + garbCount);
-                }
+                chosenByTier[tier] = itemIndex;
             }
         }
 
-        //The Update() method is run on every frame of the game.
-        private void Update()
+        private void Inventory_GiveItem_ItemIndex_int(
+            On.RoR2.Inventory.orig_GiveItem_ItemIndex_int orig,
+            Inventory self,
+            ItemIndex itemIndex,
+            int count)
         {
-            //This if statement checks if the player has currently pressed F2.
-            if (Input.GetKeyDown(KeyCode.F2))
+            Log.Info($"OnlyOneItemPerTier: GiveItem called – item={itemIndex}, count={count}, inv={self?.name}");
+
+            if(self == null || count <= 0 || itemIndex == ItemIndex.None)
             {
-                //Get the player body to use a position:
-                var transform = PlayerCharacterMasterController.instances[0].master.GetBodyObject().transform;
-
-                //And then drop our defined item in front of the player.
-
-                Log.Info($"Player pressed F2. Spawning our custom item at coordinates {transform.position}");
-                PickupDropletController.CreatePickupDroplet(PickupCatalog.FindPickupIndex(myItemDef.itemIndex), transform.position, transform.forward * 20f);
+                orig(self, itemIndex, count);
+                return;
             }
+
+            ItemDef itemDef = ItemCatalog.GetItemDef(itemIndex);
+            if (itemDef == null)
+            {
+                orig(self, itemIndex, count);
+                return;
+            }
+
+            ItemTier tier = itemDef.tier;
+
+            if(!IsTierHandled(tier))
+            {
+                orig(self, itemIndex, count);
+                return;
+            }
+
+            var tracker = self.GetComponent<PerTierTracker>();
+            if (tracker == null)
+            {
+                tracker = self.gameObject.AddComponent<PerTierTracker>();
+            }
+
+            ItemIndex chosenItemIndex;
+
+            if (!tracker.TryGetChosenItem(tier, out chosenItemIndex))
+            {
+                chosenItemIndex = GetRandomItemOfTier(tier);
+                if (chosenItemIndex == ItemIndex.None)
+                {
+                    // If something is weird and we can't find a candidate, just fall back to original
+                    orig(self, itemIndex, count);
+                    return;
+                }
+
+                tracker.SetChosenItem(tier, chosenItemIndex);
+            }
+
+            orig(self, chosenItemIndex, count);
+        }
+
+        private bool IsTierHandled(ItemTier tier)
+        {
+            // Basic example: only common / uncommon / legendary
+            return tier == ItemTier.Tier1
+                || tier == ItemTier.Tier2
+                || tier == ItemTier.Tier3
+                || tier == ItemTier.Lunar
+                || tier == ItemTier.Boss
+                || tier == ItemTier.VoidTier1
+                || tier == ItemTier.VoidTier2
+                || tier == ItemTier.VoidTier3
+                || tier == ItemTier.VoidBoss;
+        }
+
+        private ItemIndex GetRandomItemOfTier(ItemTier tier)
+        {
+            var run = Run.instance;
+            if (run == null)
+            {
+                return ItemIndex.None;
+            }
+
+            // Use availableItems so we don't pick locked / disabled content
+            var available = run.availableItems;
+
+            // Collect all candidate items of the requested tier that are available
+            List<ItemIndex> candidates = new List<ItemIndex>();
+
+            foreach (ItemIndex idx in ItemCatalog.allItems)
+            {
+                if (!available.Contains(idx))
+                    continue;
+
+                ItemDef def = ItemCatalog.GetItemDef(idx);
+                if (def != null && def.tier == tier)
+                {
+                    candidates.Add(idx);
+                }
+            }
+
+            if (candidates.Count == 0)
+            {
+                return ItemIndex.None;
+            }
+
+            // Use the run's treasureRng for consistency with the game's randomness
+            int choice = run.treasureRng.RangeInt(0, candidates.Count);
+            return candidates[choice];
         }
     }
 }
